@@ -1,7 +1,8 @@
 # A national biopsy-anchored benchmark reveals a CT performance ceiling for donor liver macrosteatosis assessment
 
 Official implementation accompanying the manuscript:
-[Paper PDF](paper/Liver_Transplant_Paper.pdf) | (coming soon)
+
+[Paper PDF](paper/manuscript.pdf) | [Project Website](https://sayoni-c98.github.io/liver-transplant-project/)
 
 
 ## Summary

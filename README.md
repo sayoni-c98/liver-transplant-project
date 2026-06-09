@@ -19,8 +19,6 @@ Using 2,709 biopsy-verified deceased donor livers, we demonstrate a practical CT
 - XGBoost benchmark models
 - Stacked ensemble models
 - 3D vision models
-- Model calibration and evaluation
-- Statistical analysis scripts
 - Figure-generation scripts
 - Reproducibility workflows
 - Requirements and environment specifications

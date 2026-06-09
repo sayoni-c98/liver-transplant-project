@@ -2,7 +2,7 @@
 
 Official implementation accompanying the manuscript:
 
-[Paper PDF](paper/manuscript.pdf) | [Project Website](https://sayoni-c98.github.io/liver-transplant-project/)
+
 
 
 ## Summary

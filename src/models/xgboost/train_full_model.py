@@ -370,3 +370,107 @@ def choose_fixed_params(df, output_dir):
 
     return best_params
 
+# ==================================================
+# OOF PLATT CALIBRATION
+# ==================================================
+
+def get_oof_platt(X_train, y5_train, ybin_train, seed, fixed_params, seed_dir):
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=seed)
+
+    oof_raw = np.zeros(len(X_train), dtype=float)
+    rows = []
+
+    for fold_id, (tr_idx, val_idx) in enumerate(skf.split(X_train, y5_train), start=1):
+        X_tr_raw = X_train.iloc[tr_idx]
+        X_val_raw = X_train.iloc[val_idx]
+
+        y5_tr = y5_train.iloc[tr_idx]
+        y5_val = y5_train.iloc[val_idx]
+
+        pre = make_preprocessor(FULL_MODEL_FEATURES)
+        X_tr = pre.fit_transform(X_tr_raw)
+        X_val = pre.transform(X_val_raw)
+
+        sw = compute_sample_weight(class_weight="balanced", y=y5_tr)
+
+        model = make_xgb(seed + 20000 + fold_id, fixed_params)
+        model = fit_xgb_with_early_stopping(
+            model,
+            X_tr,
+            y5_tr,
+            X_val,
+            y5_val,
+            sample_weight=sw,
+        )
+
+        prob_val_raw, _ = get_binary_prob_from_5class(model, X_val)
+        oof_raw[val_idx] = prob_val_raw
+
+        for j, global_idx in enumerate(val_idx):
+            rows.append({
+                "seed": seed,
+                "fold": fold_id,
+                "row_id_train": int(global_idx),
+                "y_binary_true": int(ybin_train.iloc[global_idx]),
+                "prob_raw_oof": float(prob_val_raw[j]),
+            })
+
+    platt = fit_platt_scaler(oof_raw, ybin_train.values)
+    oof_platt = apply_platt_scaler(platt, oof_raw)
+
+    sweep_platt = threshold_sweep(ybin_train.values, oof_platt)
+    best_thr = get_best_mcc_threshold(sweep_platt)
+
+    cv_oof_pred_df = pd.DataFrame(rows)
+    cv_oof_pred_df["prob_platt_oof"] = oof_platt
+    cv_oof_pred_df.to_csv(
+        seed_dir / "cv_oof_predictions_raw_and_platt.csv",
+        index=False,
+    )
+
+    sweep_platt["seed"] = seed
+    sweep_platt["split"] = "cv_oof_platt"
+    sweep_platt.to_csv(
+        seed_dir / "cv_oof_threshold_sweep_platt.csv",
+        index=False,
+    )
+
+    return platt, best_thr, cv_oof_pred_df, sweep_platt
+
+
+# ==================================================
+# FINAL MODEL TRAINING
+# ==================================================
+
+def train_final_model(X_train, y5_train, seed, fixed_params):
+    tr_idx, val_idx = train_test_split(
+        np.arange(len(X_train)),
+        test_size=0.20,
+        random_state=seed,
+        stratify=y5_train,
+    )
+
+    X_tr_raw = X_train.iloc[tr_idx]
+    X_val_raw = X_train.iloc[val_idx]
+
+    y_tr = y5_train.iloc[tr_idx]
+    y_val = y5_train.iloc[val_idx]
+
+    pre = make_preprocessor(FULL_MODEL_FEATURES)
+
+    X_tr = pre.fit_transform(X_tr_raw)
+    X_val = pre.transform(X_val_raw)
+
+    sw = compute_sample_weight(class_weight="balanced", y=y_tr)
+
+    model = make_xgb(seed, fixed_params)
+    model = fit_xgb_with_early_stopping(
+        model,
+        X_tr,
+        y_tr,
+        X_val,
+        y_val,
+        sample_weight=sw,
+    )
+
+    return pre, model

@@ -474,3 +474,152 @@ def train_final_model(X_train, y5_train, seed, fixed_params):
     )
 
     return pre, model
+
+# ==================================================
+# ONE-SEED FINAL EVALUATION
+# ==================================================
+
+def run_one_final_seed(df, fixed_params, seed, output_dir):
+    seed_dir = output_dir / "stage2_final_10seed" / f"seed_{seed}"
+    seed_dir.mkdir(parents=True, exist_ok=True)
+
+    train_idx, test_idx = train_test_split(
+        df.index,
+        test_size=TEST_SIZE,
+        random_state=seed,
+        stratify=df["y_5class"],
+    )
+
+    train_df = df.loc[train_idx].reset_index(drop=True)
+    test_df = df.loc[test_idx].reset_index(drop=True)
+
+    X_train = train_df[FULL_MODEL_FEATURES].copy()
+    X_test = test_df[FULL_MODEL_FEATURES].copy()
+
+    y5_train = train_df["y_5class"].astype(int)
+    y5_test = test_df["y_5class"].astype(int)
+
+    ybin_train = train_df["y_binary"].astype(int)
+    ybin_test = test_df["y_binary"].astype(int)
+
+    print(
+        f"{MODEL_NAME} | seed {seed} | "
+        f"train={len(train_df)} test={len(test_df)} | "
+        f"test_pos={ybin_test.sum()} test_neg={(1 - ybin_test).sum()}",
+        flush=True,
+    )
+
+    platt, best_thr, cv_oof_pred_df, cv_sweep_platt = get_oof_platt(
+        X_train=X_train,
+        y5_train=y5_train,
+        ybin_train=ybin_train,
+        seed=seed,
+        fixed_params=fixed_params,
+        seed_dir=seed_dir,
+    )
+
+    pre_final, model_final = train_final_model(
+        X_train=X_train,
+        y5_train=y5_train,
+        seed=seed,
+        fixed_params=fixed_params,
+    )
+
+    joblib.dump(model_final, seed_dir / "final_model.pkl")
+    joblib.dump(pre_final, seed_dir / "final_preprocessor.pkl")
+    joblib.dump(platt, seed_dir / "platt_scaler.pkl")
+
+    X_test_trans = pre_final.transform(X_test)
+    prob_test_raw, p5_test = get_binary_prob_from_5class(model_final, X_test_trans)
+    prob_test_platt = apply_platt_scaler(platt, prob_test_raw)
+
+    test_metrics = compute_metrics(ybin_test.values, prob_test_platt, best_thr)
+
+    pre_brier = float(brier_score_loss(ybin_test.values, prob_test_raw))
+    pre_ece = expected_calibration_error(ybin_test.values, prob_test_raw)
+    pre_slope, pre_intercept = calibration_slope_intercept(
+        ybin_test.values,
+        prob_test_raw,
+    )
+
+    test_sweep_platt = threshold_sweep(ybin_test.values, prob_test_platt)
+    test_sweep_platt["seed"] = seed
+    test_sweep_platt["split"] = "test_platt"
+    test_sweep_platt["cv_selected_threshold_by_mcc"] = best_thr
+    test_sweep_platt.to_csv(
+        seed_dir / "test_threshold_sweep_platt.csv",
+        index=False,
+    )
+
+    pred_df = pd.DataFrame({
+        "model": MODEL_NAME,
+        "seed": seed,
+        "biopsy_macro_fat": test_df[TARGET_COL].values,
+        "y_5class_true": y5_test.values,
+        "y_binary_true": ybin_test.values,
+        "prob_binary_raw": prob_test_raw,
+        "prob_binary_platt": prob_test_platt,
+        "pred_binary_platt_cv_mcc_threshold": (
+            prob_test_platt >= best_thr
+        ).astype(int),
+        "cv_selected_threshold_by_mcc": best_thr,
+        "p_class_0_clean": p5_test[:, 0],
+        "p_class_1_1to9": p5_test[:, 1],
+        "p_class_2_10to29": p5_test[:, 2],
+        "p_class_3_30to49": p5_test[:, 3],
+        "p_class_4_50plus": p5_test[:, 4],
+    })
+
+    if UUID_COL in test_df.columns:
+        pred_df.insert(2, UUID_COL, test_df[UUID_COL].values)
+
+    if DONOR_ID_COL in test_df.columns:
+        insert_position = 3 if UUID_COL in pred_df.columns else 2
+        pred_df.insert(insert_position, DONOR_ID_COL, test_df[DONOR_ID_COL].values)
+
+    pred_df.to_csv(seed_dir / "test_predictions.csv", index=False)
+
+    detail = {
+        "model": MODEL_NAME,
+        "seed": seed,
+        "calibration_method": "platt",
+        "n_total": len(df),
+        "n_train": len(train_df),
+        "n_test": len(test_df),
+        "train_pos_binary": int(ybin_train.sum()),
+        "train_neg_binary": int((1 - ybin_train).sum()),
+        "test_pos_binary": int(ybin_test.sum()),
+        "test_neg_binary": int((1 - ybin_test).sum()),
+        "n_features_raw": len(FULL_MODEL_FEATURES),
+        "cv_selected_threshold_by_mcc": best_thr,
+        "pre_brier": pre_brier,
+        "pre_ece": pre_ece,
+        "pre_cal_slope": pre_slope,
+        "pre_cal_intercept": pre_intercept,
+        **test_metrics,
+    }
+
+    for k, v in fixed_params.items():
+        detail[f"fixed_param_{k}"] = v
+
+    pd.DataFrame([detail]).to_csv(
+        seed_dir / "final_test_metrics.csv",
+        index=False,
+    )
+
+    print(
+        f"{MODEL_NAME} | seed {seed} | "
+        f"AUC={test_metrics['roc_auc']:.4f} | "
+        f"PR-AUC={test_metrics['pr_auc']:.4f} | "
+        f"MCC={test_metrics['mcc']:.4f} | "
+        f"Brier(pre)={pre_brier:.4f} "
+        f"Brier(platt)={test_metrics['brier']:.4f}",
+        flush=True,
+    )
+
+    return {
+        "detail": detail,
+        "pred": pred_df,
+        "cv_sweep": cv_sweep_platt,
+        "test_sweep": test_sweep_platt,
+    }

@@ -648,7 +648,6 @@ def aggregate_outputs(output_dir, seed_outputs, fixed_params):
         "pre_brier", "pre_ece",
         "accuracy", "f1",
         "sensitivity", "specificity", "ppv", "npv", "mcc",
-        "sens_at_90spec",
         "cv_selected_threshold_by_mcc",
     ]
 

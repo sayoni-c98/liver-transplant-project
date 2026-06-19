@@ -196,3 +196,177 @@ def get_binary_prob_from_5class(model, X):
     prob_binary = p5[:, 3] + p5[:, 4]
 
     return prob_binary, p5
+
+# ==================================================
+# DATA LOADING
+# ==================================================
+
+def load_data(data_csv):
+    df = pd.read_csv(data_csv)
+
+    required = [TARGET_COL] + FULL_MODEL_FEATURES
+    optional_id_cols = [UUID_COL, DONOR_ID_COL]
+
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    df["y_5class"] = df[TARGET_COL].apply(macro_fat_to_5class)
+    df["y_binary"] = df[TARGET_COL].apply(macro_fat_to_binary)
+
+    before = len(df)
+    df = df.dropna(subset=[TARGET_COL, "y_5class", "y_binary"] + FULL_MODEL_FEATURES).copy()
+    after = len(df)
+
+    df["y_5class"] = df["y_5class"].astype(int)
+    df["y_binary"] = df["y_binary"].astype(int)
+
+    print("=" * 90)
+    print("DATA LOADED")
+    print("=" * 90)
+    print(f"Input CSV:          {data_csv}")
+    print(f"Rows before dropna: {before}")
+    print(f"Rows after dropna:  {after}")
+    print(f"Features:           {len(FULL_MODEL_FEATURES)}")
+    print("\n5-class label distribution:")
+    print(df["y_5class"].value_counts().sort_index())
+    print("\nBinary label distribution:")
+    print(df["y_binary"].value_counts().sort_index())
+    print("=" * 90)
+
+    return df
+
+
+# ==================================================
+# RANDOM SEARCH
+# ==================================================
+
+def evaluate_one_param_one_seed(df, param_id, params, seed):
+    train_idx, _ = train_test_split(
+        df.index,
+        test_size=TEST_SIZE,
+        random_state=seed,
+        stratify=df["y_5class"],
+    )
+
+    train_df = df.loc[train_idx].reset_index(drop=True)
+
+    X_train = train_df[FULL_MODEL_FEATURES].copy()
+    y5_train = train_df["y_5class"].astype(int)
+
+    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=seed)
+    fold_rows = []
+
+    for fold_id, (tr_idx, val_idx) in enumerate(skf.split(X_train, y5_train), start=1):
+        X_tr_raw = X_train.iloc[tr_idx]
+        X_val_raw = X_train.iloc[val_idx]
+
+        y_tr = y5_train.iloc[tr_idx]
+        y_val = y5_train.iloc[val_idx]
+        y_val_bin = (y_val >= 3).astype(int)
+
+        pre = make_preprocessor(FULL_MODEL_FEATURES)
+        X_tr = pre.fit_transform(X_tr_raw)
+        X_val = pre.transform(X_val_raw)
+
+        sw = compute_sample_weight(class_weight="balanced", y=y_tr)
+
+        model = make_xgb(seed + 100000 + param_id * 100 + fold_id, params)
+        model = fit_xgb_with_early_stopping(
+            model,
+            X_tr,
+            y_tr,
+            X_val,
+            y_val,
+            sample_weight=sw,
+        )
+
+        prob_val, _ = get_binary_prob_from_5class(model, X_val)
+
+        fold_rows.append({
+            "param_id": param_id,
+            "seed": seed,
+            "fold": fold_id,
+            "fold_roc_auc": float(roc_auc_score(y_val_bin, prob_val)),
+            "fold_pr_auc": float(average_precision_score(y_val_bin, prob_val)),
+            **clean_params(params),
+        })
+
+    return fold_rows
+
+
+def choose_fixed_params(df, output_dir):
+    tune_dir = output_dir / "stage1_random_search"
+    tune_dir.mkdir(parents=True, exist_ok=True)
+
+    param_list = list(ParameterSampler(
+        PARAM_DISTRIBUTIONS,
+        n_iter=RANDOM_SEARCH_ITER,
+        random_state=PARAM_SAMPLER_SEED,
+    ))
+
+    pd.DataFrame([
+        {"param_id": i + 1, **clean_params(p)}
+        for i, p in enumerate(param_list)
+    ]).to_csv(tune_dir / "random_search_parameter_list.csv", index=False)
+
+    print("=" * 90)
+    print("STAGE 1 — RANDOM SEARCH")
+    print("=" * 90)
+    print(f"Candidates: {RANDOM_SEARCH_ITER}")
+    print(f"Seeds:      {len(SEEDS)}")
+    print(f"Folds:      {N_SPLITS}")
+    print(f"Total fits: {RANDOM_SEARCH_ITER * len(SEEDS) * N_SPLITS}")
+    print("=" * 90)
+
+    all_rows_nested = Parallel(
+        n_jobs=TUNE_PARALLEL_JOBS,
+        backend="loky",
+        verbose=5,
+    )(
+        delayed(evaluate_one_param_one_seed)(
+            df,
+            param_id=i + 1,
+            params=params,
+            seed=seed,
+        )
+        for i, params in enumerate(param_list)
+        for seed in SEEDS
+    )
+
+    rows = [r for block in all_rows_nested for r in block]
+    fold_df = pd.DataFrame(rows)
+    fold_df.to_csv(tune_dir / "random_search_fold_level_results.csv", index=False)
+
+    group_cols = ["param_id"] + list(PARAM_DISTRIBUTIONS.keys())
+
+    summary_df = (
+        fold_df
+        .groupby(group_cols, as_index=False)
+        .agg(
+            mean_cv_pr_auc=("fold_pr_auc", "mean"),
+            std_cv_pr_auc=("fold_pr_auc", "std"),
+            mean_cv_roc_auc=("fold_roc_auc", "mean"),
+            std_cv_roc_auc=("fold_roc_auc", "std"),
+            n_evals=("fold", "count"),
+        )
+        .sort_values(
+            ["mean_cv_pr_auc", "mean_cv_roc_auc"],
+            ascending=[False, False],
+        )
+        .reset_index(drop=True)
+    )
+
+    summary_df.to_csv(tune_dir / "random_search_summary_by_param.csv", index=False)
+
+    best_row = summary_df.iloc[0]
+    best_params = clean_params({k: best_row[k] for k in PARAM_DISTRIBUTIONS.keys()})
+
+    with open(tune_dir / "fixed_best_params.json", "w") as f:
+        json.dump(best_params, f, indent=4)
+
+    print("\nFixed best parameters:")
+    print(json.dumps(best_params, indent=4))
+
+    return best_params
+

@@ -21,6 +21,4 @@ Notes:
   image branch by relative filename).
 - The `.pkl` files must be loaded with `tabpfn==2.2.1` (they embed a fitted TabPFN
   model).
-- The weights are released under CC BY-NC 4.0 on Hugging Face; confirm this is
-  compatible with this repository's license and your data use agreement before
-  redistributing.
+- The weights are released under CC BY-NC 4.0 on Hugging Face

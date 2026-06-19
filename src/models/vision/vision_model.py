@@ -269,7 +269,7 @@ if __name__ == "__main__":
     t.add_argument("--out", default="weights/vision_suprem.pt")
     t.add_argument("--epochs", type=int, default=100)
     t.add_argument("--patience", type=int, default=25)
-    t.add_argument("--batch-size", type=int, default=8, dest="batch_size",
+    t.add_argument("--batch-size", type=int, default=32, dest="batch_size",
                    help="split across all visible GPUs via DataParallel")
     t.set_defaults(func=train)
     p = sub.add_parser("predict")

@@ -623,3 +623,193 @@ def run_one_final_seed(df, fixed_params, seed, output_dir):
         "cv_sweep": cv_sweep_platt,
         "test_sweep": test_sweep_platt,
     }
+
+# ==================================================
+# AGGREGATION
+# ==================================================
+
+def aggregate_outputs(output_dir, seed_outputs, fixed_params):
+    agg_dir = output_dir / "aggregated_results"
+    agg_dir.mkdir(parents=True, exist_ok=True)
+
+    detail_df = pd.DataFrame([x["detail"] for x in seed_outputs])
+    pred_df = pd.concat([x["pred"] for x in seed_outputs], ignore_index=True)
+    cv_sweep_df = pd.concat([x["cv_sweep"] for x in seed_outputs], ignore_index=True)
+    test_sweep_df = pd.concat([x["test_sweep"] for x in seed_outputs], ignore_index=True)
+
+    detail_df.to_csv(agg_dir / "final_test_metrics_all_seeds.csv", index=False)
+    pred_df.to_csv(agg_dir / "test_predictions_all_seeds.csv", index=False)
+    cv_sweep_df.to_csv(agg_dir / "cv_oof_threshold_sweep_all_seeds.csv", index=False)
+    test_sweep_df.to_csv(agg_dir / "test_threshold_sweep_all_seeds.csv", index=False)
+
+    metric_cols = [
+        "roc_auc", "pr_auc",
+        "brier", "ece", "cal_slope", "cal_intercept",
+        "pre_brier", "pre_ece",
+        "accuracy", "f1",
+        "sensitivity", "specificity", "ppv", "npv", "mcc",
+        "sens_at_90spec",
+        "cv_selected_threshold_by_mcc",
+    ]
+
+    summary_rows = []
+
+    for metric in metric_cols:
+        if metric not in detail_df.columns:
+            continue
+
+        mean = detail_df[metric].mean()
+        std = detail_df[metric].std()
+
+        summary_rows.append({
+            "model": MODEL_NAME,
+            "metric": metric,
+            "mean": round(mean, 4),
+            "std": round(std, 4),
+            "formatted": fmt_mean_std(mean, std),
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(agg_dir / "final_summary_mean_std_4decimals.csv", index=False)
+
+    paper_row = {"model": MODEL_NAME}
+
+    for metric in metric_cols:
+        if metric in detail_df.columns:
+            paper_row[metric] = fmt_mean_std(
+                detail_df[metric].mean(),
+                detail_df[metric].std(),
+            )
+
+    for k, v in fixed_params.items():
+        paper_row[f"fixed_param_{k}"] = v
+
+    pd.DataFrame([paper_row]).to_csv(
+        agg_dir / "paper_ready_summary_wide.csv",
+        index=False,
+    )
+
+    print("=" * 90)
+    print("AGGREGATED RESULTS")
+    print("=" * 90)
+    print(summary_df.to_string(index=False))
+
+    return paper_row
+
+
+# ==================================================
+# MAIN
+# ==================================================
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train full multimodal XGBoost model with Platt calibration."
+    )
+
+    parser.add_argument(
+        "--data_csv",
+        type=str,
+        required=True,
+        help="Path to input CSV containing required features and target column.",
+    )
+
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="outputs/xgboost_full_model",
+        help="Directory where outputs will be saved.",
+    )
+
+    parser.add_argument(
+        "--random_search_iter",
+        type=int,
+        default=RANDOM_SEARCH_ITER,
+        help="Number of random-search hyperparameter candidates.",
+    )
+
+    parser.add_argument(
+        "--tune_jobs",
+        type=int,
+        default=TUNE_PARALLEL_JOBS,
+        help="Parallel jobs for hyperparameter tuning.",
+    )
+
+    parser.add_argument(
+        "--eval_jobs",
+        type=int,
+        default=EVAL_PARALLEL_JOBS,
+        help="Parallel jobs for final seed evaluation.",
+    )
+
+    parser.add_argument(
+        "--xgb_jobs",
+        type=int,
+        default=XGB_N_JOBS,
+        help="Threads per XGBoost model.",
+    )
+
+    return parser.parse_args()
+
+
+def main():
+    global RANDOM_SEARCH_ITER
+    global TUNE_PARALLEL_JOBS
+    global EVAL_PARALLEL_JOBS
+    global XGB_N_JOBS
+
+    args = parse_args()
+
+    RANDOM_SEARCH_ITER = args.random_search_iter
+    TUNE_PARALLEL_JOBS = args.tune_jobs
+    EVAL_PARALLEL_JOBS = args.eval_jobs
+    XGB_N_JOBS = args.xgb_jobs
+
+    data_csv = Path(args.data_csv)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 90)
+    print("FULL MULTIMODAL XGBOOST PIPELINE")
+    print("=" * 90)
+    print(f"Model:       {MODEL_NAME}")
+    print(f"Data CSV:    {data_csv}")
+    print(f"Output dir:  {output_dir}")
+    print(f"Features:    {len(FULL_MODEL_FEATURES)}")
+    print(f"Calibration: Platt scaling on OOF training probabilities")
+    print("=" * 90)
+
+    df = load_data(data_csv)
+
+    pd.DataFrame({
+        "rank": range(1, len(FULL_MODEL_FEATURES) + 1),
+        "feature": FULL_MODEL_FEATURES,
+    }).to_csv(output_dir / "feature_list_used.csv", index=False)
+
+    fixed_params = choose_fixed_params(df, output_dir)
+
+    print("=" * 90)
+    print("STAGE 2 — FINAL 10-SEED EVALUATION")
+    print("=" * 90)
+
+    seed_outputs = Parallel(
+        n_jobs=EVAL_PARALLEL_JOBS,
+        backend="loky",
+        verbose=5,
+    )(
+        delayed(run_one_final_seed)(
+            df,
+            fixed_params,
+            seed,
+            output_dir,
+        )
+        for seed in SEEDS
+    )
+
+    aggregate_outputs(output_dir, seed_outputs, fixed_params)
+
+    print("\nDONE.")
+    print(f"Outputs saved to: {output_dir}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,28 +1,32 @@
-# Software environment for the liver-transplant-project models.
-#
-# Pinned versions match the released weights on
-# https://huggingface.co/philmorekoung/liver-steatosis and are required to load
-# the pickled models. Unpinned packages may use any recent version.
+# ==========================================================
+# Liver Transplant Project Requirements
+# ==========================================================
 
-# Core
+# Core scientific computing
 numpy
 pandas
-einops
-scikit-learn==1.6.1
+scipy
 joblib
+tqdm
+einops
 
-# Gradient-boosted tree models (src/models/xgboost, src/models/tr-tree)
+# Medical image processing
+SimpleITK
+nibabel
+
+# Image processing
+opencv-python-headless
+
+# Machine learning
+scikit-learn==1.6.1
 xgboost==3.2.0
 lightgbm==4.6.0
-
-# Stacked-ensemble base learner (src/models/tr-tree)
-# Pin: the pickled models embed a fitted TabPFN object, and newer releases change
-# the model and add an interactive license gate for weight download.
 tabpfn==2.2.1
 
-# Vision model (src/models/vision, src/models/tr-tree full_model.py image branch)
+# Deep learning
 torch
+torchvision
 monai
 
-# Weight download from the Hugging Face Hub
+# Model download
 huggingface_hub
